@@ -36,3 +36,6 @@ uploads/
 
 # Playwright MCP fixture/cache directory
 .playwright-mcp/
+
+# Debug captures from Playwright auth troubleshooting
+debug-*.png
