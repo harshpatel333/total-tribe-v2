@@ -76,6 +76,50 @@ def test_normalise_parcel_strips_roi_suffix_and_hemi_prefix() -> None:
     assert interpretation._normalise_parcel("V1") == "V1"
 
 
+def test_summarize_empty_returns_placeholder(fake_atlas_dir: Path) -> None:
+    interp = interpretation.RegionInterpreter(atlas_dir=fake_atlas_dir)
+    s = interp.summarize([])
+    assert "No region table" in s["headline"]
+    assert s["categories"] == []
+
+
+def test_summarize_groups_by_category_and_picks_dominant() -> None:
+    """A clearly auditory top-K should produce an 'auditory' headline."""
+    interp = interpretation.RegionInterpreter.__new__(interpretation.RegionInterpreter)
+    interp._lookup = {}  # not needed; we pass enriched rows directly
+    rows = [
+        {"parcel": "R_PBelt", "category": "auditory", "activation": 0.35},
+        {"parcel": "R_LBelt", "category": "auditory", "activation": 0.30},
+        {"parcel": "L_A5", "category": "auditory", "activation": 0.30},
+        {"parcel": "R_A5", "category": "auditory", "activation": 0.29},
+        {"parcel": "R_A4", "category": "auditory", "activation": 0.27},
+        {"parcel": "R_PCV", "category": "default_mode", "activation": -0.20},
+        {"parcel": "L_TPOJ2", "category": "social_cognition", "activation": -0.18},
+        {"parcel": "R_7m", "category": "default_mode", "activation": -0.15},
+    ]
+    s = interp.summarize(rows)
+    assert "auditory cortex" in s["headline"]
+    assert s["categories"][0]["category"] == "auditory"
+    assert s["categories"][0]["count"] == 5
+    # Default-mode (2 rows) outranks social (1 row) by count.
+    assert s["categories"][1]["category"] == "default_mode"
+    # Narrative mentions the secondary group too.
+    assert "default-mode network" in s["narrative"]
+
+
+def test_summarize_skips_uncategorised_rows() -> None:
+    """Rows with no category (lookup miss) shouldn't show up in the breakdown."""
+    interp = interpretation.RegionInterpreter.__new__(interpretation.RegionInterpreter)
+    interp._lookup = {}
+    rows = [
+        {"parcel": "X_FOO", "category": None, "activation": 0.5},
+        {"parcel": "R_MT", "category": "motion", "activation": 0.4},
+    ]
+    s = interp.summarize(rows)
+    cats = {c["category"] for c in s["categories"]}
+    assert cats == {"motion"}
+
+
 def test_missing_parcel_in_lookup_returns_empty_terms(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
