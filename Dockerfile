@@ -12,7 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv, then a managed Python 3.12, then a venv at /opt/venv.
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+# Symlink uv/uvx into /usr/local/bin so they are on PATH regardless of how
+# the container is invoked (Dokploy/Swarm sometimes scrubs ENV PATH for the
+# entrypoint, and TRIBE's audio extractor shells out to `uvx whisperx ...`).
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+ && ln -sf /root/.local/bin/uv  /usr/local/bin/uv \
+ && ln -sf /root/.local/bin/uvx /usr/local/bin/uvx
 ENV PATH="/root/.local/bin:/opt/venv/bin:${PATH}"
 RUN uv python install 3.12 && uv venv --python 3.12 /opt/venv
 ENV VIRTUAL_ENV=/opt/venv

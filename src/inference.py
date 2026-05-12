@@ -14,11 +14,28 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import tempfile
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
+
+# Defensive PATH prepend so TRIBE's audio extractor (which shells out to
+# `uvx whisperx ...`) can always find uvx regardless of how the container
+# was invoked. Some Swarm/Dokploy configurations scrub PATH for the
+# entrypoint; this guards against silent FileNotFoundError on audio inputs.
+_UV_BIN_DIRS = (
+    "/usr/local/bin",
+    os.path.expanduser("~/.local/bin"),
+    "/root/.local/bin",
+)
+_current_path = os.environ.get("PATH", "")
+_path_parts = _current_path.split(os.pathsep) if _current_path else []
+for _d in _UV_BIN_DIRS:
+    if _d not in _path_parts:
+        _path_parts.insert(0, _d)
+os.environ["PATH"] = os.pathsep.join(_path_parts)
 
 logger = logging.getLogger(__name__)
 
