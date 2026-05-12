@@ -30,3 +30,9 @@ uploads/
 # Editor / OS
 .idea/
 .DS_Store
+
+# Claude Code runtime state
+.claude/
+
+# Playwright MCP fixture/cache directory
+.playwright-mcp/

@@ -37,8 +37,7 @@ docs/
 .git/
 .github/
 
-# Top-level markdown docs (don't ship into image)
-README.md
+# Top-level markdown docs (don't ship into image; README.md kept for pyproject metadata)
 CHANGELOG.md
 CONTRIBUTING.md
 CODE_OF_CONDUCT.md

@@ -4,7 +4,7 @@ A self-hosted Gradio UI for Meta's TRIBE v2 brain-encoding model.
 
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](./LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
-[![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#)
+[![Status: v0.1.0](https://img.shields.io/badge/status-v0.1.0-blue.svg)](#)
 
 ## What this is
 
@@ -42,7 +42,15 @@ Once the container is up, open <http://localhost:7860> in a browser. First run d
 
 ## Screenshots
 
-<!-- TODO: add screenshots after first deploy → docs/images/ -->
+End-to-end smoke tests against the deployed UI, captured during the v0.1.0 first deploy:
+
+| Modality | Top region | Screenshot |
+| --- | --- | --- |
+| Image (synthetic face → 5 s loop) | `R_MT` (motion / vision) | ![image predict](./docs/images/01-image-predict.png) |
+| Video (8 s face clip) | `R_MT` + bilateral `R_VMV3` / `L_VMV3` (ventral visual) | ![video predict](./docs/images/02-video-predict.png) |
+| Audio (32 s synthesized speech) | bilateral auditory cortex (`R_PBelt`, `R_LBelt`, `L/R_A5`, `L/R_A4`, `L_LBelt`, `R_TA2`) | ![audio predict](./docs/images/03-audio-predict.png) |
+
+Each modality produces a neurally distinct, semantically appropriate signature on the fsaverage5 cortical surface. See [`CHANGELOG.md`](./CHANGELOG.md) for the full verification table.
 
 ## How it works
 

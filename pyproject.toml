@@ -35,6 +35,9 @@ dev = [
     "pre-commit>=3.7",
 ]
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 

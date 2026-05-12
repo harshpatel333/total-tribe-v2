@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-11
 **Spike performed by:** verifying upstream API + loading the published TRIBE v2 checkpoint structure on a 3× RTX 3090 devcontainer.
-**Verified by:** Harsh Patel (account: harshpatel333)
+**Verified by:** the project maintainer
 
 The original TECH_SPEC was drafted before the upstream API was inspected. Several load-bearing claims turned out to be wrong. This document is the source of truth for what differs from the spec. The revised `docs/TECH_SPEC.md` (v2) will reflect all of these.
 
@@ -83,7 +83,7 @@ Single RTX 3090, 24 GB. Other GPU workloads on the box (e.g. Ollama) must be pau
 
 ## What still needs verifying
 
-- **VRAM peak under real load** — blocked on Meta approving LLaMA-3.2-3B access for `harshpatel333`. Once approved, run a short video prediction and confirm peak ≤ 24 GB.
+- **VRAM peak under real load** — pending Meta's approval of LLaMA-3.2-3B for the maintainer's HuggingFace account. Once approved, run a short video prediction and confirm peak ≤ 24 GB. (Bimodal peak verified post-deploy: image 14014 MiB, video 14006 MiB; see `docs/RISKS.md`.)
 - **`get_events_dataframe` actual column set** — we have the docstring claim (`type`, `filepath`, `start`, `duration`, `timeline`, `subject`) but haven't run it. Verify post-approval.
 - **`CreateVideosFromImages` interaction with the model's transform pipeline** — confirmed not in default pipeline, but if our client-side conversion produces video clips that look weird to V-JEPA2, the predictions may be noisy. Test with a face close-up at deploy time; FFA should activate at t≈5s.
 - **HCP-MMP1 `.annot` files compatibility with fsaverage5** — the standard download is on fsaverage7. We need the fsaverage5-resampled version per spec §8.1. Verify.
