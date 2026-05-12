@@ -33,3 +33,6 @@ uploads/
 
 # Claude Code runtime state
 .claude/
+
+# Playwright MCP fixture/cache directory
+.playwright-mcp/
