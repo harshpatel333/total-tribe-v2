@@ -1,0 +1,29 @@
+# Domain, TLS, and basic-auth are configured in the Dokploy UI — no Traefik labels here.
+# See docs/DEPLOYMENT.md and docs/DECISIONS/0003-dokploy-ui-for-domains-and-auth.md
+services:
+  tribev2:
+    build: .
+    image: total-tribe-v2:latest
+    container_name: tribev2
+    restart: unless-stopped
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - ENABLE_TEXT=${ENABLE_TEXT:-true}
+      - HF_HOME=/app/cache
+      - TRIBE_CACHE=/app/cache
+    volumes:
+      - tribev2-cache:/app/cache
+      - tribev2-uploads:/app/uploads
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+    expose:
+      - "7860"
+
+volumes:
+  tribev2-cache:
+  tribev2-uploads:

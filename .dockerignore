@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+coverage.xml
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+
+# Project data
+cache/
+uploads/
+.hf_cache/
+*.ckpt
+
+# Editor / OS
+.idea/
+.DS_Store
+
+# Build context excludes
+tests/fixtures/
+docs/
+.git/
+.github/
+
+# Top-level markdown docs (don't ship into image)
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+SECURITY.md
+CLAUDE.md

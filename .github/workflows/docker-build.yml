@@ -1,0 +1,25 @@
+name: Docker build
+
+# TODO: registry push (e.g. ghcr.io/<owner>/total-tribe-v2) is left for a follow-up
+# once we wire up a registry secret. For now this workflow only verifies the image
+# builds successfully on tag pushes and manual dispatch.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (no push)
+        run: docker build .
