@@ -83,9 +83,10 @@ def _get_fsaverage() -> Any:
 def render_brain(t: int) -> str:
     """Render LH + RH cortical surfaces at timestep ``t`` as side-by-side iframes.
 
-    Both hemispheres are rendered with ``view_surf`` (threshold ``"5%"``,
-    ``cmap="hot"``) and embedded as iframes inside a flex container so they
-    sit side-by-side in the Gradio HTML pane.
+    Uses the **pial** mesh (not inflated) so the surface looks like a real
+    brain rather than a balloon. Sulcal depth provides the grey-on-grey
+    anatomical context; the ``hot`` colormap overlays a 5% threshold of the
+    predicted activation map.
     """
     from nilearn.plotting import view_surf
 
@@ -101,8 +102,11 @@ def render_brain(t: int) -> str:
     rh = activation[_VERTS_PER_HEMI:]
     fsa = _get_fsaverage()
 
+    # Pial mesh looks anatomically brain-like; inflated mesh looks like a
+    # balloon and confuses non-neuroscientists. We trade gyral detail for
+    # interpretability.
     lh_view = view_surf(
-        surf_mesh=fsa["infl_left"],
+        surf_mesh=fsa["pial_left"],
         surf_map=lh,
         bg_map=fsa.get("sulc_left"),
         hemi="left",
@@ -112,7 +116,7 @@ def render_brain(t: int) -> str:
         title=f"Left hemisphere — t={t}s",
     )
     rh_view = view_surf(
-        surf_mesh=fsa["infl_right"],
+        surf_mesh=fsa["pial_right"],
         surf_map=rh,
         bg_map=fsa.get("sulc_right"),
         hemi="right",
@@ -138,6 +142,44 @@ def _top_regions_at(t: int) -> list[dict[str, Any]]:
         return []
     t = max(0, min(t, preds.shape[0] - 1))
     return _get_interpreter().top_regions(preds[t], k=8)
+
+
+def _summary_markdown(top_regions: list[dict[str, Any]]) -> str:
+    """Produce the layman summary Markdown for a given region table."""
+    if not top_regions:
+        return (
+            "*Upload a stimulus and click **Predict brain response** to see "
+            "a plain-English interpretation here.*"
+        )
+    summary = _get_interpreter().summarize(top_regions)
+    lines = [f"### {summary['headline']}", "", summary["narrative"]]
+    cats = summary.get("categories") or []
+    if cats:
+        lines.append("")
+        lines.append("**Network breakdown** (of the top 8 regions):")
+        for c in cats:
+            sign = "+" if c["mean_activation"] >= 0 else "−"
+            lines.append(
+                f"- {c['display']} — {c['count']} region"
+                f"{'s' if c['count'] != 1 else ''}, "
+                f"mean activation {sign}{abs(c['mean_activation']):.2f}"
+            )
+    return "\n".join(lines)
+
+
+def _regions_table(top_regions: list[dict[str, Any]]) -> list[list[Any]]:
+    """Format a region list as a friendly tabular DataFrame for Gradio."""
+    rows: list[list[Any]] = []
+    for r in top_regions:
+        rows.append(
+            [
+                r.get("name", r.get("parcel", "?")),
+                f"{r.get('activation', 0.0):+.2f}",
+                (r.get("category") or "").replace("_", " "),
+                r.get("function", ""),
+            ]
+        )
+    return rows
 
 
 def _pick_active_input(
@@ -167,22 +209,20 @@ def run_inference(
     audio: str | None,
     text: str | None,
     video: str | None,
-) -> tuple[str, list[dict[str, Any]], Any]:
+) -> tuple[str, str, list[list[Any]], Any]:
     """Top-level Gradio callback.
 
-    Validates exactly one input is non-empty, routes through
-    ``TribeInference.predict``, caches the result in ``LAST``, and returns
-    ``(brain_html, region_table, slider_update)`` where the slider is
-    seeded at ``t = min(_HEMODYNAMIC_LAG_S, T-1)``.
+    Returns ``(summary_md, brain_html, region_rows, slider_update)`` where the
+    slider is seeded at ``t = min(_HEMODYNAMIC_LAG_S, T-1)``.
     """
     import gradio as gr
 
     modality, value = _pick_active_input(image, audio, text, video)
     if modality is None:
-        return _NO_INPUT_HTML, [], gr.update()
+        return _summary_markdown([]), _NO_INPUT_HTML, [], gr.update()
 
     if modality == "text" and not ENABLE_TEXT:
-        return _TEXT_PENDING_HTML, [], gr.update()
+        return _summary_markdown([]), _TEXT_PENDING_HTML, [], gr.update()
 
     if modality == "text":
         # Persist the text passage to a temp file so the engine's path-based
@@ -206,12 +246,18 @@ def run_inference(
     t_init = min(_HEMODYNAMIC_LAG_S, t_max)
     brain_html = render_brain(t_init)
     regions = _top_regions_at(t_init)
-    return brain_html, regions, gr.update(minimum=0, maximum=t_max, value=t_init, step=1)
+    return (
+        _summary_markdown(regions),
+        brain_html,
+        _regions_table(regions),
+        gr.update(minimum=0, maximum=t_max, value=t_init, step=1),
+    )
 
 
-def on_slider_change(t: int) -> tuple[str, list[dict[str, Any]]]:
-    """Re-render brain + region table at timestep ``t`` from cached ``LAST``."""
-    return render_brain(int(t)), _top_regions_at(int(t))
+def on_slider_change(t: int) -> tuple[str, str, list[list[Any]]]:
+    """Re-render summary + brain + region table at timestep ``t`` from cached ``LAST``."""
+    regions = _top_regions_at(int(t))
+    return _summary_markdown(regions), render_brain(int(t)), _regions_table(regions)
 
 
 def build_ui() -> Any:
@@ -270,18 +316,28 @@ def build_ui() -> Any:
                     label="Timestep (s after stimulus; +5 s ≈ peak)",
                 )
             with gr.Column(scale=2):
+                summary_md = gr.Markdown(
+                    value=_summary_markdown([]),
+                    label="Layman summary",
+                )
                 brain_view = gr.HTML(value=_NO_INPUT_HTML, label="Cortical surface (LH + RH)")
-                regions_tbl = gr.JSON(label="Top active HCP-MMP1 regions")
+                regions_tbl = gr.Dataframe(
+                    headers=["Region", "Activation", "Network", "What it does"],
+                    datatype=["str", "str", "str", "str"],
+                    interactive=False,
+                    wrap=True,
+                    label="Top 8 active regions",
+                )
 
         run_btn.click(
             run_inference,
             inputs=[image_in, audio_in, text_in, video_in],
-            outputs=[brain_view, regions_tbl, t_slider],
+            outputs=[summary_md, brain_view, regions_tbl, t_slider],
         )
         t_slider.change(
             on_slider_change,
             inputs=[t_slider],
-            outputs=[brain_view, regions_tbl],
+            outputs=[summary_md, brain_view, regions_tbl],
         )
 
     return demo
