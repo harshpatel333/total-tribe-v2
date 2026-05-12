@@ -20,6 +20,21 @@ logger = logging.getLogger(__name__)
 _VERTS_PER_HEMI = 10242
 
 
+def _normalise_parcel(name: str) -> str:
+    """Strip HCP-MMP1 ``_ROI`` suffix and leading hemi prefix.
+
+    The GOBS annot files ship labels like ``L_V1_ROI``; ``parcel_lookup.json``
+    uses bare names like ``V1``. We normalise to the bare form so the loop can
+    re-prefix with the correct hemisphere.
+    """
+    s = name
+    if s.endswith("_ROI"):
+        s = s[: -len("_ROI")]
+    if s.startswith(("L_", "R_")):
+        s = s[2:]
+    return s
+
+
 class RegionInterpreter:
     """Map a per-vertex activation vector into a top-K HCP-MMP1 region table.
 
@@ -107,7 +122,7 @@ class RegionInterpreter:
                 mask = labels == idx
                 if not mask.any():
                     continue
-                key = f"{hemi}_{name}"
+                key = f"{hemi}_{_normalise_parcel(name)}"
                 activation = float(pred[mask].mean())
                 entry = self._lookup.get(key, {})
                 rows.append(

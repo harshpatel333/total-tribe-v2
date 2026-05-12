@@ -67,6 +67,15 @@ def test_top_regions_rejects_wrong_shape(fake_atlas_dir: Path) -> None:
         interp.top_regions(np.zeros(10), k=4)
 
 
+def test_normalise_parcel_strips_roi_suffix_and_hemi_prefix() -> None:
+    """GOBS annot ships ``L_V1_ROI``; lookup keys are bare ``V1``. The
+    interpreter strips both and re-prefixes with the loop's hemi."""
+    assert interpretation._normalise_parcel("L_V1_ROI") == "V1"
+    assert interpretation._normalise_parcel("R_FFC_ROI") == "FFC"
+    assert interpretation._normalise_parcel("FFC") == "FFC"  # already bare
+    assert interpretation._normalise_parcel("V1") == "V1"
+
+
 def test_missing_parcel_in_lookup_returns_empty_terms(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

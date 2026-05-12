@@ -1,14 +1,13 @@
 """Gradio UI for total-tribe-v2.
 
 Four input tabs (image / audio / text / video) → ``TribeInference`` →
-``RegionInterpreter`` → brain map + top-K region table + time slider.
-
-This file is a STUB. Real inference is wired up after LLaMA-3.2-3B approval;
-see docs/RISKS.md and the ``# TODO(LLaMA-approval):`` block below.
+``RegionInterpreter`` → both-hemisphere brain map + top-K region table +
+time slider.
 
 Single-user constraint: the module-level ``LAST`` dict caches the most-recent
 prediction so the slider can re-render without re-running inference. This
-intentionally does not generalise to multi-tenant; see ADR-0003.
+intentionally does not generalise to multi-tenant; see ADR-0003. v1 is
+deployed behind basic auth; one user, one GPU.
 """
 
 from __future__ import annotations
@@ -22,112 +21,268 @@ from . import inference, interpretation
 
 logger = logging.getLogger(__name__)
 
+ENABLE_TEXT = os.environ.get("ENABLE_TEXT", "false").lower() in {"1", "true", "yes"}
 CACHE_DIR = Path(os.environ.get("TRIBE_CACHE", "/app/cache"))
-ATLAS_DIR = Path("atlases")
-ENABLE_TEXT = os.environ.get("ENABLE_TEXT", "true").lower() in {"1", "true", "yes"}
+ATLAS_DIR = Path(os.environ.get("ATLASES_DIR", "atlases"))
+
+# fsaverage5 has 10242 vertices per hemisphere.
+_VERTS_PER_HEMI = 10242
+# Hemodynamic lag: BOLD peaks ~5 s after stimulus onset. We seed the slider
+# at this offset so the first frame the user sees is the peak response.
+_HEMODYNAMIC_LAG_S = 5
 
 # Module-level state: most-recent prediction. Single-user only.
-LAST: dict[str, Any] = {"preds": None, "segments": None, "modality": None}
+LAST: dict[str, Any] = {"preds": None, "segments": None}
+
+_TEXT_PENDING_HTML = (
+    "<p>Text input requires Meta approval for "
+    '<a href="https://huggingface.co/meta-llama/Llama-3.2-3B" '
+    'target="_blank" rel="noopener noreferrer">Llama-3.2-3B</a>. '
+    "Currently pending — try audio, video, or image for now.</p>"
+)
+
+_NO_INPUT_HTML = (
+    "<p>Upload an image, audio, or video (or paste text once Meta access "
+    "lands) and click <b>Predict brain response</b>.</p>"
+)
+
+# Lazily instantiated. We can't construct them at import time because tests
+# import this module on CPU and don't have HF cache or atlases available.
+_engine: inference.TribeInference | None = None
+_interpreter: interpretation.RegionInterpreter | None = None
+_fsaverage: Any = None
 
 
-def _placeholder_brain_html(t: int) -> str:
-    """Stub renderer until nilearn integration lands."""
+def _get_engine() -> inference.TribeInference:
+    global _engine
+    if _engine is None:
+        _engine = inference.TribeInference(
+            enable_text=ENABLE_TEXT,
+            cache_dir=CACHE_DIR,
+            device="cuda:0",
+        )
+    return _engine
+
+
+def _get_interpreter() -> interpretation.RegionInterpreter:
+    global _interpreter
+    if _interpreter is None:
+        _interpreter = interpretation.RegionInterpreter(atlas_dir=ATLAS_DIR)
+    return _interpreter
+
+
+def _get_fsaverage() -> Any:
+    global _fsaverage
+    if _fsaverage is None:
+        from nilearn.datasets import fetch_surf_fsaverage
+
+        _fsaverage = fetch_surf_fsaverage("fsaverage5")
+    return _fsaverage
+
+
+def render_brain(t: int) -> str:
+    """Render LH + RH cortical surfaces at timestep ``t`` as side-by-side iframes.
+
+    Both hemispheres are rendered with ``view_surf`` (threshold ``"5%"``,
+    ``cmap="hot"``) and embedded as iframes inside a flex container so they
+    sit side-by-side in the Gradio HTML pane.
+    """
+    from nilearn.plotting import view_surf
+
+    preds = LAST.get("preds")
+    if preds is None:
+        return _NO_INPUT_HTML
+
+    if t < 0 or t >= preds.shape[0]:
+        t = max(0, min(t, preds.shape[0] - 1))
+
+    activation = preds[t]
+    lh = activation[:_VERTS_PER_HEMI]
+    rh = activation[_VERTS_PER_HEMI:]
+    fsa = _get_fsaverage()
+
+    lh_view = view_surf(
+        surf_mesh=fsa["infl_left"],
+        surf_map=lh,
+        bg_map=fsa.get("sulc_left"),
+        hemi="left",
+        threshold="5%",
+        cmap="hot",
+        symmetric_cmap=False,
+        title=f"Left hemisphere — t={t}s",
+    )
+    rh_view = view_surf(
+        surf_mesh=fsa["infl_right"],
+        surf_map=rh,
+        bg_map=fsa.get("sulc_right"),
+        hemi="right",
+        threshold="5%",
+        cmap="hot",
+        symmetric_cmap=False,
+        title=f"Right hemisphere — t={t}s",
+    )
+
+    lh_html = lh_view.get_iframe()
+    rh_html = rh_view.get_iframe()
     return (
-        "<div style='padding:1em;border:1px dashed #888;'>"
-        f"<b>Brain view placeholder</b><br>"
-        f"Time index: <code>{t}</code><br>"
-        "Real rendering wired up post-LLaMA approval."
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;">'
+        f'<div style="flex:1;min-width:360px;">{lh_html}</div>'
+        f'<div style="flex:1;min-width:360px;">{rh_html}</div>'
         "</div>"
     )
 
 
-def run_inference(
-    modality: str,
+def _top_regions_at(t: int) -> list[dict[str, Any]]:
+    preds = LAST.get("preds")
+    if preds is None:
+        return []
+    t = max(0, min(t, preds.shape[0] - 1))
+    return _get_interpreter().top_regions(preds[t], k=8)
+
+
+def _pick_active_input(
     image: str | None,
     audio: str | None,
     text: str | None,
     video: str | None,
-) -> tuple[str, list[dict[str, Any]], int]:
+) -> tuple[str | None, str | None]:
+    """Return ``(modality, value)`` for the single non-empty input, or ``(None, None)``.
+
+    If more than one input is set, prefer the order: image > audio > text > video.
+    Empty strings (textbox default) count as missing.
+    """
+    if image:
+        return "image", image
+    if audio:
+        return "audio", audio
+    if text and text.strip():
+        return "text", text
+    if video:
+        return "video", video
+    return None, None
+
+
+def run_inference(
+    image: str | None,
+    audio: str | None,
+    text: str | None,
+    video: str | None,
+) -> tuple[str, list[dict[str, Any]], Any]:
     """Top-level Gradio callback.
 
-    Routes the active modality's path to ``TribeInference.predict``, caches
-    the result in ``LAST``, and returns ``(brain_html, region_rows, max_t)``.
-
-    TODO(LLaMA-approval): once the real model is wired, this will call
-    ``_engine.predict(modality, path)`` and feed the result through
-    ``_interpreter.top_regions``. For now it returns a placeholder so the UI
-    layout is verifiable without GPU.
+    Validates exactly one input is non-empty, routes through
+    ``TribeInference.predict``, caches the result in ``LAST``, and returns
+    ``(brain_html, region_table, slider_update)`` where the slider is
+    seeded at ``t = min(_HEMODYNAMIC_LAG_S, T-1)``.
     """
-    path_map = {"image": image, "audio": audio, "text": text, "video": video}
-    path = path_map.get(modality)
-    if not path:
-        return _placeholder_brain_html(0), [], 0
+    import gradio as gr
 
-    # TODO(LLaMA-approval): replace with real engine + interpreter calls.
-    LAST["modality"] = modality
-    LAST["preds"] = None
-    LAST["segments"] = None
-    logger.info("Stub inference: modality=%s path=%s", modality, path)
-    return _placeholder_brain_html(0), [], 0
+    modality, value = _pick_active_input(image, audio, text, video)
+    if modality is None:
+        return _NO_INPUT_HTML, [], gr.update()
+
+    if modality == "text" and not ENABLE_TEXT:
+        return _TEXT_PENDING_HTML, [], gr.update()
+
+    if modality == "text":
+        # Persist the text passage to a temp file so the engine's path-based
+        # API can consume it. The hash-cache makes repeat predictions free.
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(value or "")
+            stim_path = Path(tmp.name)
+    else:
+        stim_path = Path(value or "")
+
+    logger.info("running inference: modality=%s path=%s", modality, stim_path)
+    preds, segments = _get_engine().predict(modality, stim_path)  # type: ignore[arg-type]
+    LAST["preds"] = preds
+    LAST["segments"] = segments
+
+    t_max = max(0, int(preds.shape[0]) - 1)
+    t_init = min(_HEMODYNAMIC_LAG_S, t_max)
+    brain_html = render_brain(t_init)
+    regions = _top_regions_at(t_init)
+    return brain_html, regions, gr.update(minimum=0, maximum=t_max, value=t_init, step=1)
 
 
-def render_at(t: int) -> str:
-    """Re-render the brain view at time index ``t`` using ``LAST``.
-
-    TODO(LLaMA-approval): plug ``_interpreter.top_regions(LAST['preds'][t])``
-    + nilearn surface render for both hemispheres.
-    """
-    return _placeholder_brain_html(t)
+def on_slider_change(t: int) -> tuple[str, list[dict[str, Any]]]:
+    """Re-render brain + region table at timestep ``t`` from cached ``LAST``."""
+    return render_brain(int(t)), _top_regions_at(int(t))
 
 
 def build_ui() -> Any:
     """Construct and return the Gradio Blocks app (not launched)."""
-    import gradio as gr  # heavy import; defer until runtime
+    import gradio as gr
 
-    with gr.Blocks(title="total-tribe-v2") as demo:
-        gr.Markdown("# total-tribe-v2\nBrain-encoding predictions on fsaverage5.")
+    text_placeholder = (
+        "Paste a passage (≤30 s of reading) …"
+        if ENABLE_TEXT
+        else "(Text disabled — pending Meta approval for Llama-3.2-3B)"
+    )
 
-        with gr.Tabs():
-            with gr.Tab("image"):
-                image_in = gr.Image(
-                    type="filepath",
-                    label="Still image (converted to a 5 s video clip)",
-                )
-            with gr.Tab("audio"):
-                audio_in = gr.Audio(type="filepath", label="Audio (wav / mp3 / flac / ogg)")
-            with gr.Tab("text"):
-                text_in = gr.Textbox(
-                    label="Text",
-                    placeholder="Paste a passage (≤30 s of reading) …",
-                    lines=8,
-                )
-            with gr.Tab("video"):
-                video_in = gr.Video(label="Video (mp4 / avi / mkv / mov / webm)")
-
-        with gr.Row():
-            modality = gr.Radio(
-                choices=["image", "audio", "text", "video"],
-                value="video",
-                label="Active modality",
-            )
-            run_btn = gr.Button("Run inference", variant="primary")
-
-        brain_view = gr.HTML(label="Brain (LH + RH)")
-        region_table = gr.JSON(label="Top regions")
-        slider = gr.Slider(
-            minimum=0,
-            maximum=0,
-            step=1,
-            value=0,
-            label="Time (s) — BOLD response peaks ~5 s after stimulus onset",
+    with gr.Blocks(title="TRIBE v2 — Brain Response Predictor") as demo:
+        gr.Markdown("# TRIBE v2 — Predicted fMRI Brain Activity")
+        gr.Markdown(
+            "Upload an image, audio, text, or video. Output is the predicted "
+            "population-average BOLD activation on fsaverage5 at 1 Hz. "
+            "The model accounts for ~5 s hemodynamic lag (peak at +5 s). "
+            "Inputs ≤ 30 s recommended."
         )
+        with gr.Row():
+            with gr.Column(scale=1):
+                with gr.Tabs():
+                    with gr.TabItem("Image"):
+                        image_in = gr.Image(
+                            type="filepath",
+                            label="Still image → 5 s silent clip",
+                        )
+                    with gr.TabItem("Audio"):
+                        audio_in = gr.Audio(type="filepath", label="Audio")
+                    with gr.TabItem("Text"):
+                        text_in = gr.Textbox(
+                            label="Text",
+                            lines=4,
+                            interactive=ENABLE_TEXT,
+                            placeholder=text_placeholder,
+                        )
+                        if not ENABLE_TEXT:
+                            gr.Markdown(
+                                "**Text input requires Meta approval for "
+                                "[Llama-3.2-3B]"
+                                "(https://huggingface.co/meta-llama/Llama-3.2-3B). "
+                                "Currently pending.**"
+                            )
+                    with gr.TabItem("Video"):
+                        video_in = gr.Video(label="Video")
+                run_btn = gr.Button("Predict brain response", variant="primary")
+                # Maximum is reset by run_inference once we know T. Gradio 6
+                # requires minimum < maximum at construction time, so we start
+                # at (0, 1) and let the callback widen it.
+                t_slider = gr.Slider(
+                    minimum=0,
+                    maximum=1,
+                    step=1,
+                    value=0,
+                    label="Timestep (s after stimulus; +5 s ≈ peak)",
+                )
+            with gr.Column(scale=2):
+                brain_view = gr.HTML(value=_NO_INPUT_HTML, label="Cortical surface (LH + RH)")
+                regions_tbl = gr.JSON(label="Top active HCP-MMP1 regions")
 
         run_btn.click(
-            fn=run_inference,
-            inputs=[modality, image_in, audio_in, text_in, video_in],
-            outputs=[brain_view, region_table, slider],
+            run_inference,
+            inputs=[image_in, audio_in, text_in, video_in],
+            outputs=[brain_view, regions_tbl, t_slider],
         )
-        slider.change(fn=render_at, inputs=[slider], outputs=[brain_view])
+        t_slider.change(
+            on_slider_change,
+            inputs=[t_slider],
+            outputs=[brain_view, regions_tbl],
+        )
 
     return demo
 
@@ -135,17 +290,11 @@ def build_ui() -> Any:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     logger.info(
-        "Starting total-tribe-v2 (ENABLE_TEXT=%s, CACHE_DIR=%s)",
+        "Starting total-tribe-v2 (ENABLE_TEXT=%s, CACHE_DIR=%s, ATLAS_DIR=%s)",
         ENABLE_TEXT,
         CACHE_DIR,
+        ATLAS_DIR,
     )
-    # The real inference engine + interpreter live here. They are instantiated
-    # lazily so this module can be imported in CPU-only tests.
-    _engine = inference.TribeInference(  # noqa: F841 (used in real call below)
-        enable_text=ENABLE_TEXT,
-        cache_dir=CACHE_DIR,
-    )
-    _interpreter = interpretation.RegionInterpreter(atlas_dir=ATLAS_DIR)  # noqa: F841
     demo = build_ui()
     demo.launch(server_name="0.0.0.0", server_port=7860)
 
