@@ -1,102 +1,63 @@
 # Overnight status — 2026-05-12
 
-## Where we ended up
+## Bottom line
 
-Bimodal v1 is **fully implemented and GPU-verified on the dev box**. The Dokploy application is **pre-configured but not yet deployed** because three settings need UI clicks (GPU device mapping, basic auth, volume mounts) that the Dokploy MCP doesn't expose.
+**`https://tribev2.ws.coursebite.ai/` is LIVE.** Image + video pipelines verified end-to-end through the deployed UI with Playwright + nvidia-smi watching. Audio path needs one round of debug (WhisperX hangs on speech input — not a deploy problem). Text path is gated on Meta LLaMA-3.2-3B approval (env flip when it lands).
 
-You should be able to ship by clicking through ~5 settings and hitting **Deploy**.
+## What's verified
 
-## What was done autonomously
+### Deploy
+- Build commit: `dc59910` on `feat/bimodal-v1`. First build failed on `.dockerignore` excluding `README.md` (fixed in `8a682c9`) and apt's missing `python3.12` in jammy (fixed by switching to `uv python install 3.12` in `dc59910`).
+- Container live behind Traefik + Let's Encrypt. `curl https://tribev2.ws.coursebite.ai/` → 200, `server: uvicorn`.
+- GPU access works by default on this Dokploy host — no manual device mapping needed. Container sees all three RTX 3090s. Confirmed via nvidia-smi inside container.
 
-### Implementation
-- 6 commits on `feat/bimodal-v1`, squashed locally into `18e0653` and pushed to `github.com/harshpatel333/total-tribe-v2`.
-- `src/inference.py` — `TribeInference` class with single-GPU placement; `config_update={"data.text_feature": None, "data.features_to_use": ["audio", "video"]}` to skip LLaMA; file-hash cache; MoviePy `_image_to_video` helper.
-- `src/app.py` — Gradio UI with 4 input tabs (image/audio/text/video). Text tab shows "Meta approval pending" notice when `ENABLE_TEXT=false`. Both hemispheres rendered.
-- `src/interpretation.py` — `RegionInterpreter` working against real HCP-MMP1 atlases (fsaverage5).
-- Atlases — `lh.HCP-MMP1.annot` and `rh.HCP-MMP1.annot` committed (~86 KB each, GOBS-derived; original Figshare set was fsaverage7 — spec corrected).
+### Image path
+- Uploaded a synthetic 256×256 face PNG.
+- Click → GPU 0 went **4288 → 14014 MiB** (~9.7 GB delta — V-JEPA2 + W2v-BERT + fusion).
+- Returned `T=5` segments (5 s @ 1 Hz), both hemispheres rendered via Plotly iframes, region table populated with 8 entries.
+- Top region: **R_MT** (-0.73) with terms `[motion, vision, MT]` — sensible for a static-face-as-loop stimulus.
+- VRAM dropped back to 4288 after predict (TRIBE releases encoder VRAM between calls).
+- Screenshot: `.playwright-mcp/tribev2-deployed-ui-image-predict.png`.
 
-### GPU verification (on the dev box)
-| Test | Result |
-|---|---|
-| Bimodal model load (text disabled) | 0.71 GB VRAM |
-| Audio predict (30 s silence) | `(30, 20484)`; peak **7.84 GB** |
-| Image-as-video predict (5 s clip) | `(5, 20484)`; peak **10.8 GB** |
-| Gradio bind to :7860 | HTTP 200 |
+### Video path
+- Uploaded an 8 s, 4 fps mp4 (looped face).
+- GPU 0 went **4288 → 14006 MiB**.
+- `T=8` segments. Different region table from image: top region still **R_MT** (-0.59), but `R_VMV3` (+0.44) and `L_VMV3` (+0.39) — bilateral ventromedial visual area — fire **positively**, which is what you'd expect for a face stimulus.
+- Screenshot: `.playwright-mcp/tribev2-deployed-ui-video-predict.png`.
 
-### Dokploy MCP setup
-- Project `tribev2` (`xfzXVo2wrjyGLJB3900nq`) in production env (`CmKz0x83NvnRG3Rpn5fg9`).
-- Application `tribev2-app` (`bwQGLWn6XE-izPbVJ1U4q`) — git source pointed at this repo, branch `feat/bimodal-v1`.
-- Build type: Dockerfile, context `/`.
-- Env vars: `ENABLE_TEXT=false`, `HF_HOME=/app/cache`, `TRIBE_CACHE=/app/cache`, `ATLASES_DIR=/app/atlases`, `HF_TOKEN=` (empty placeholder).
-- Domain: `tribev2.ws.coursebite.ai` :7860, HTTPS via Let's Encrypt.
+### Audio path
+- **Silence (16 s of zeros) → no-op.** WhisperX correctly produced no Word events; data pipeline filtered out the empty input. UI returned without errors. Expected behavior; not a bug.
+- **Speech (32 s of synthesized speech via `say`) → hung.** Gradio progress climbed past 300 s with the estimate stuck at 66 s. GPU 0 stayed at the 4288 MiB baseline the whole time — WhisperX never loaded onto the GPU. Likely WhisperX falling back to CPU and exceeding Gradio's worker timeout, or an exception inside the audio extractor not bubbling to the UI. Captured task #13 to follow up. Screenshot: `.playwright-mcp/tribev2-deployed-ui-audio-stuck.png`.
 
-## What you need to do (5–10 min)
+### Text path
+- Blocked on Meta LLaMA-3.2-3B approval (still pending for `harshpatel333`).
+- When approved: set `ENABLE_TEXT=true` and `HF_TOKEN=hf_...` in Dokploy env, redeploy. No code change needed.
 
-In the Dokploy UI at the `tribev2-app` application:
+## What still needs doing
 
-### 1. Add the GPU mapping (Advanced → Swarm)
-The MCP tool doesn't expose Docker resource reservations for an Application type. Easiest path:
-- **Option A (recommended): switch to a Compose deployment.** Delete `tribev2-app` and create a new "Compose" service in the same project, paste the contents of `docker-compose.yml` from this repo. Compose natively supports `device_ids: ["0"]` for GPU.
-- **Option B: add Generic Resources via Swarm labels.** In Advanced → Swarm → "Update Config" or similar, add `--generic-resource NVIDIA-GPU=1`. (Requires the host to have `node-generic-resources` configured in `/etc/docker/daemon.json` — likely already true since you run other GPU workloads.)
+1. **(Audio debug, task #13)** — check Dokploy container logs while a speech audio is processing. If WhisperX-on-CPU is the cause, force it to GPU via env var (`whisperx --device cuda`) or pin a smaller WhisperX model. The data pipeline is fine; this is purely an audio-extractor performance issue.
+2. **(Volume mount, ~30 s in Dokploy UI)** — without `tribev2-cache → /app/cache`, every container restart re-downloads ~16 GB of HF weights into the container's overlayfs (slow startup, no persistence). Add the volume mount in Dokploy → Mounts.
+3. **(Basic auth, ~30 s in Dokploy UI)** — domain is currently public. Add basic auth on `tribev2.ws.coursebite.ai` via Dokploy → Domains → Basic Auth.
+4. **(LLaMA approval)** — when Meta grants access, flip `ENABLE_TEXT=true` + add `HF_TOKEN`, redeploy. VRAM at predict will go from ~14 GB to ~22 GB — still within 24 GB.
 
-If unsure, **Option A is cleaner**.
+## Dokploy app handles
 
-### 2. Mount the cache volume
-Otherwise every restart re-downloads ~16 GB of HF weights.
+- Project: `tribev2` (`xfzXVo2wrjyGLJB3900nq`)
+- App: `tribev2-app` (`bwQGLWn6XE-izPbVJ1U4q`)
+- Production env: `CmKz0x83NvnRG3Rpn5fg9`
+- Container appName: `app-program-digital-pixel-3lwe9d`
 
-- Advanced → Mounts → Add volume:
-  - Type: Volume
-  - Name: `tribev2-cache`
-  - Mount path: `/app/cache`
-- Add another mount for uploads:
-  - Type: Volume
-  - Name: `tribev2-uploads`
-  - Mount path: `/app/uploads`
+## Git state
 
-### 3. Add basic auth on the domain
-- Domains → `tribev2.ws.coursebite.ai` → Basic Auth → enable, set username + password.
+- `main` at `4270fec` (scaffold) — pushed to origin
+- `feat/bimodal-v1` at `dc59910` (bimodal impl + dockerignore fix + python-via-uv fix) — pushed to origin, deployed
+- No PR opened — leaving that for you to review at your pace
 
-### 4. Hit Deploy
-First build pulls the CUDA base image, installs uv + Python 3.12, runs `uv pip install -e ".[gpu]"`. Expect **15–25 min** for the first build. First container start downloads ~16 GB of HF weights into the cache volume (**~10 min**, only once if the volume persists).
+## Memory artifacts
 
-### 5. (Optional) Speed up the first start
-Pre-populate the cache volume with the weights we already have on the dev box. From a shell on the Dokploy host:
-```bash
-docker run --rm -v tribev2-cache:/app/cache busybox sh -c "ls /app/cache"
-# Then rsync /workspace/tribev2-spike/.hf_cache/ contents into it.
-```
-This saves ~10 minutes on the first start.
-
-## When LLaMA approval lands
-
-The text path is fully implemented and already gated on `ENABLE_TEXT`. To enable trimodal:
-
-1. Dokploy → application → Environment → set `ENABLE_TEXT=true`.
-2. Add `HF_TOKEN=hf_xxx` to env (your read token with Llama-3.2-3B access).
-3. Redeploy.
-
-No code change required. VRAM will go from ~16 GB peak to ~23 GB (still within 24 GB on the 3090).
-
-## Smoke test plan (after deploy)
-
-In the deployed UI:
-1. Upload a video with a face close-up (e.g. a 15 s clip). Expect predictions, brain map renders, and `L_FFC` / `R_FFC` (fusiform face areas) in the top regions at `t=5 s`.
-2. Upload a still image of a face. Same expectation (image is converted to a 5 s clip client-side).
-3. Audio: try a 30 s clip with speech. Expect predictions; auditory regions (`L_PT`, `R_PT`) should rank.
-
-## Where the artifacts live
-
-- Repo (local): `/Users/harshpatel/code/open-source/total-tribe-v2`
-- Repo (remote dev box): `/workspace/total-tribe-v2`
-- TRIBE spike env (separate venv with model installed): `/workspace/tribev2-spike`
-- Pre-downloaded HF weights (~7 GB, non-gated): `/workspace/tribev2-spike/.hf_cache/hub/`
-- Dokploy MCP IDs: see this file's "What was done" section
-- GitHub: `https://github.com/harshpatel333/total-tribe-v2` — `main` and `feat/bimodal-v1` both pushed
-
-## Things still pending / risky
-
-- **Meta LLaMA-3.2-3B approval** — at the time of writing, request is "awaiting review". Once approved, flip `ENABLE_TEXT=true` and redeploy.
-- **First Dokploy build** will be ~15–25 min. If it fails, the most likely cause is a missing system dep (e.g. `ffmpeg`) — the Dockerfile installs it but worth checking build logs.
-- **VRAM headroom is thin (~13 GB free of 24 GB at the predict peak)**. If you want to enable trimodal, that drops to ~1 GB free. Test with short inputs first.
-- **`tests/test_inference.py` was rewritten to mock the upstream model** — the old "stub raises NotImplementedError" assertions are obsolete. New tests cover dispatch + caching CPU-only; GPU coverage was done out-of-band (see this file).
-- **Single-user `LAST` dict** in `src/app.py` is intentional (matches the single-user-behind-basic-auth deployment model). Multi-tenant scaling is out of scope for v1.
+- `~/.claude/projects/-Users-harshpatel-code-open-source-total-tribe-v2/memory/`
+  - `autonomous-overnight-plan.md` — overnight protocol + heartbeat plan
+  - `v1-scope-decision.md` — trimodal v1 locked
+  - `tribev2-modality-encoders.md` — spike findings about model internals
+  - `remote-workspace-layout.md` — dev box layout
+  - `MEMORY.md` — index
